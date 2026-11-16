@@ -17,6 +17,9 @@ class KiteBroker:
     def quote(self, instruments: list[str]) -> dict:
         return self.kite.quote(instruments)
 
+    def instruments(self, exchange: str) -> list[dict]:
+        return self.kite.instruments(exchange)
+
 
 def login_url(api_key: str, nonce: str) -> str:
     from kiteconnect import KiteConnect
