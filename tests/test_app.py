@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlparse
 from fastapi.testclient import TestClient
 
 import app.main as terminal
+import app.market_data as market_data
 from app.demo import candles
 from app.risk import RiskLimits, validate_order
 from app.strategy import backtest
@@ -26,7 +27,7 @@ class PrivateTerminalTests(unittest.TestCase):
         with TestClient(terminal.app, base_url="https://testserver") as visitor:
             self.assertEqual(visitor.get("/healthz").json(), {"ok": True})
             self.assertIn("Sign in with Zerodha Kite", visitor.get("/").text)
-            for path in ("/api/status", "/api/market", "/api/candles", "/api/ideas", "/api/backtest"):
+            for path in ("/api/status", "/api/market", "/api/option-chain", "/api/candles", "/api/ideas", "/api/backtest"):
                 self.assertEqual(visitor.get(path).status_code, 401, path)
             self.assertEqual(visitor.get("/static/index.html", follow_redirects=False).status_code, 303)
             self.assertEqual(visitor.post("/api/orders", json={}).status_code, 401)
@@ -85,6 +86,40 @@ class PrivateTerminalTests(unittest.TestCase):
                                 limits=RiskLimits())
         self.assertTrue(any("circuit breaker" in item for item in errors))
         self.assertTrue(any("Per-trade" in item for item in errors))
+
+
+    def test_read_only_nifty_option_chain(self):
+        from datetime import date
+
+        class Broker:
+            def instruments(self, exchange):
+                self.exchange = exchange
+                return [dict(exchange="NFO", segment="NFO-OPT", name="NIFTY",
+                             instrument_type=side, tradingsymbol=f"NIFTY_TEST_25000{side}",
+                             expiry=date(2026, 11, 19), strike=25000, lot_size=65)
+                        for side in ("CE", "PE")]
+
+            def quote(self, instruments):
+                if instruments == ["NSE:NIFTY 50"]:
+                    return {"NSE:NIFTY 50": {"last_price": 25002, "timestamp": "2026-11-16 15:30:00"}}
+                self.requested = instruments
+                return {symbol: {"last_price": 99.5, "oi": 13000, "volume": 750,
+                                 "timestamp": "2026-11-16 15:29:00",
+                                 "depth": {"buy": [{"price": 99, "quantity": 65, "orders": 2}],
+                                           "sell": [{"price": 100, "quantity": 130, "orders": 3}]}}
+                        for symbol in instruments}
+
+        market_data._instrument_day = None
+        broker = Broker()
+        data = market_data.option_chain(broker, today=date(2026, 11, 16))
+        self.assertEqual(broker.exchange, "NFO")
+        self.assertEqual(broker.requested, ["NFO:NIFTY_TEST_25000CE", "NFO:NIFTY_TEST_25000PE"])
+        self.assertEqual(data["source"], "KITE_SNAPSHOT")
+        self.assertFalse(data["tradeable"])
+        self.assertEqual(data["rows"][0]["ce"]["oi"], 13000)
+        self.assertEqual(data["rows"][0]["pe"]["depth"]["sell"][0]["price"], 100)
+        with self.assertRaises(ValueError):
+            market_data.option_chain(broker, expiry="2026-12-01", today=date(2026, 11, 16))
 
 
 if __name__ == "__main__":
