@@ -13,3 +13,9 @@ services:
         value: demo
       - key: ENABLE_LIVE_ORDERS
         value: 'false'
+      - key: KITE_API_KEY
+        sync: false
+      - key: KITE_API_SECRET
+        sync: false
+      - key: ALLOWED_KITE_USER_ID
+        sync: false
