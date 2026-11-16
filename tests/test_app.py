@@ -1,70 +1,91 @@
+import os
+import unittest
+from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
+
 from fastapi.testclient import TestClient
-from app.main import app
+
+import app.main as terminal
+from app.demo import candles
 from app.risk import RiskLimits, validate_order
 from app.strategy import backtest
-from app.demo import candles
-from urllib.parse import parse_qs, urlparse
-import app.main as terminal
 
-client = TestClient(app)
 
-def test_home():
-    assert client.get('/').status_code == 200
-    assert client.get('/healthz').json() == {'ok': True}
-    assert client.get('/api/market').json()['spot'] is None
-    assert client.get('/api/status').json()['orders_enabled'] is False
+class PrivateTerminalTests(unittest.TestCase):
+    def setUp(self):
+        with terminal._sessions_lock:
+            terminal._sessions.clear()
+        self.env = patch.dict(os.environ, {
+            "KITE_API_KEY": "test-key", "KITE_API_SECRET": "test-secret",
+            "ALLOWED_KITE_USER_ID": "AB1234",
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
 
-def test_chart_and_backtest():
-    assert len(client.get('/api/candles').json()['candles']) == 75
-    assert client.get('/api/backtest').json()['count'] >= 0
+    def test_public_health_and_private_dashboard(self):
+        with TestClient(terminal.app, base_url="https://testserver") as visitor:
+            self.assertEqual(visitor.get("/healthz").json(), {"ok": True})
+            self.assertIn("Sign in with Zerodha Kite", visitor.get("/").text)
+            for path in ("/api/status", "/api/market", "/api/candles", "/api/ideas", "/api/backtest"):
+                self.assertEqual(visitor.get(path).status_code, 401, path)
+            self.assertEqual(visitor.get("/static/index.html", follow_redirects=False).status_code, 303)
+            self.assertEqual(visitor.post("/api/orders", json={}).status_code, 401)
+            self.assertEqual(visitor.get("/docs", follow_redirects=False).status_code, 303)
 
-def test_live_order_fails_closed():
-    payload={'symbol':'NIFTY26NOV25000CE','quantity':65,'lot_size':65,'entry_premium':100,'stop_premium':90}
-    assert client.post('/api/orders',json=payload).status_code == 423
-    assert client.post('/api/orders',json={}).status_code == 423
-    assert client.get('/api/broker/check').status_code == 401
+    def test_missing_owner_fails_closed(self):
+        with patch.dict(os.environ, {"ALLOWED_KITE_USER_ID": ""}):
+            with TestClient(terminal.app, base_url="https://testserver") as visitor:
+                self.assertIn("Sign in with Zerodha Kite", visitor.get("/").text)
+                self.assertEqual(visitor.get("/api/kite/connect").status_code, 503)
+                self.assertEqual(visitor.get("/api/status").status_code, 401)
 
-def test_risk_rejects_large_loss():
-    errors=validate_order(premium=100,stop_premium=50,quantity=65,lot_size=65,
-        realized_pnl=-10000,orders_today=0,open_positions=0,limits=RiskLimits())
-    assert any('circuit breaker' in x for x in errors)
-    assert any('Per-trade' in x for x in errors)
+    @patch.object(terminal, "login_url", side_effect=lambda key, nonce: "https://kite.zerodha.com/connect/login?nonce=" + nonce)
+    @patch.object(terminal, "exchange_request_token")
+    def test_owner_only_oauth_and_locked_orders(self, exchange, _login):
+        exchange.return_value = {"access_token": "server-only-token", "user_id": "OTHER1"}
+        with TestClient(terminal.app, base_url="https://testserver") as owner:
+            start = owner.get("/api/kite/connect", follow_redirects=False)
+            self.assertEqual(start.status_code, 303)
+            self.assertIn("httponly", start.headers["set-cookie"].lower())
+            self.assertIn("secure", start.headers["set-cookie"].lower())
+            nonce = parse_qs(urlparse(start.headers["location"]).query)["nonce"][0]
+            bad = owner.get("/api/kite/callback", params={"request_token": "one-time", "nonce": "wrong"}, follow_redirects=False)
+            self.assertEqual(bad.headers["location"], "/?kite=failed")
 
-def test_backtest_returns_proxy():
-    assert 'Spot-point proxy' in backtest(candles())['disclaimer']
+            start = owner.get("/api/kite/connect", follow_redirects=False)
+            nonce = parse_qs(urlparse(start.headers["location"]).query)["nonce"][0]
+            denied = owner.get("/api/kite/callback", params={"request_token": "one-time", "nonce": nonce}, follow_redirects=False)
+            self.assertEqual(denied.headers["location"], "/?kite=unauthorized")
+            self.assertEqual(owner.get("/api/status").status_code, 401)
 
-def test_broker_setup_and_invalid_callback(monkeypatch):
-    monkeypatch.delenv('KITE_API_KEY', raising=False)
-    monkeypatch.delenv('KITE_API_SECRET', raising=False)
-    assert client.get('/api/kite/connect').status_code == 503
-    assert client.get('/api/kite/callback?request_token=bad&nonce=bad', follow_redirects=False).headers['location'] == '/?kite=failed'
-    assert client.get('/api/market').json()['source'] == 'UNAVAILABLE'
+            exchange.return_value = {"access_token": "server-only-token", "user_id": "AB1234"}
+            start = owner.get("/api/kite/connect", follow_redirects=False)
+            nonce = parse_qs(urlparse(start.headers["location"]).query)["nonce"][0]
+            done = owner.get("/api/kite/callback", params={"request_token": "one-time", "nonce": nonce}, follow_redirects=False)
+            self.assertEqual(done.headers["location"], "/?kite=connected")
+            self.assertIn("NIFTY Pro Trader", owner.get("/").text)
+            self.assertNotIn("Sign in with Zerodha Kite", owner.get("/").text)
+            self.assertEqual(owner.get("/static/index.html").status_code, 200)
+            status = owner.get("/api/status")
+            self.assertTrue(status.json()["broker_connected"])
+            self.assertFalse(status.json()["orders_enabled"])
+            self.assertNotIn("server-only-token", status.text)
+            self.assertEqual(owner.post("/api/orders", json={}).status_code, 423)
+            self.assertEqual(len(owner.get("/api/candles").json()["candles"]), 75)
+            with TestClient(terminal.app, base_url="https://testserver") as stranger:
+                self.assertEqual(stranger.get("/api/status").status_code, 401)
+                self.assertIn("Sign in with Zerodha Kite", stranger.get("/").text)
+            self.assertEqual(owner.post("/api/kite/disconnect").json(), {"connected": False})
+            self.assertEqual(owner.get("/api/status").status_code, 401)
 
-def test_read_only_kite_session(monkeypatch):
-    monkeypatch.setenv('KITE_API_KEY', 'test-key')
-    monkeypatch.setenv('KITE_API_SECRET', 'test-secret')
-    monkeypatch.setattr(terminal, 'login_url', lambda key, nonce: 'https://kite.zerodha.com/connect/login?nonce=' + nonce)
-    monkeypatch.setattr(terminal, 'exchange_request_token', lambda key, secret, token: {'access_token': 'server-only-token', 'user_id': 'AB1234'})
-    class FakeBroker:
-        def __init__(self, key, token):
-            assert token == 'server-only-token'
-        def quote(self, instruments):
-            return {'NSE:NIFTY 50': {'last_price': 25000.5, 'net_change': 10.5, 'timestamp': '2026-11-16 09:30:00', 'ohlc': {'close': 24990}}}
-    monkeypatch.setattr(terminal, 'KiteBroker', FakeBroker)
-    with TestClient(app, base_url='https://testserver') as browser:
-        start = browser.get('/api/kite/connect', follow_redirects=False)
-        assert start.status_code == 303
-        assert 'httponly' in start.headers['set-cookie'].lower()
-        assert 'secure' in start.headers['set-cookie'].lower()
-        nonce = parse_qs(urlparse(start.headers['location']).query)['nonce'][0]
-        assert browser.get('/api/kite/callback', params={'request_token': 'one-time', 'redirect_params': 'nonce=wrong'}, follow_redirects=False).headers['location'] == '/?kite=failed'
-        start = browser.get('/api/kite/connect', follow_redirects=False)
-        nonce = parse_qs(urlparse(start.headers['location']).query)['nonce'][0]
-        done = browser.get('/api/kite/callback', params={'request_token': 'one-time', 'redirect_params': 'nonce=' + nonce}, follow_redirects=False)
-        assert done.headers['location'] == '/?kite=connected'
-        assert browser.get('/api/status').json()['broker_connected'] is True
-        assert 'server-only-token' not in browser.get('/api/status').text
-        assert browser.get('/api/market').json()['spot'] == 25000.5
-        assert browser.post('/api/orders', json={}).status_code == 423
-        assert browser.post('/api/kite/disconnect').json()['connected'] is False
-        assert browser.get('/api/status').json()['broker_connected'] is False
+    def test_research_and_risk_helpers(self):
+        self.assertIn("Spot-point proxy", backtest(candles())["disclaimer"])
+        errors = validate_order(premium=100, stop_premium=50, quantity=65, lot_size=65,
+                                realized_pnl=-10000, orders_today=0, open_positions=0,
+                                limits=RiskLimits())
+        self.assertTrue(any("circuit breaker" in item for item in errors))
+        self.assertTrue(any("Per-trade" in item for item in errors))
+
+
+if __name__ == "__main__":
+    unittest.main()
