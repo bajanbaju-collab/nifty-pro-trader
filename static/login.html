@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#071326">
+  <title>Sign in · NIFTY Pro Trader</title>
+  <style>
+    :root{font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;color:#eaf3ff;background:#071326}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}
+    main{width:min(100%,440px);border:1px solid #2a4864;border-radius:18px;background:#0d2038;padding:30px;box-shadow:0 24px 60px #0005}
+    .mark{color:#3be39b;font-size:28px}h1{font-size:24px;margin:12px 0 8px}p{color:#b8cde1;line-height:1.6}
+    a.button{display:block;text-align:center;background:#3be39b;color:#053624;padding:13px;border-radius:10px;text-decoration:none;font-weight:800;margin:22px 0 14px}
+    a:focus-visible{outline:2px solid #86bcff;outline-offset:3px}.small{font-size:13px;color:#a8bfd4}
+    .alert{border:1px solid #85596a;background:#2d1d31;color:#ffd0db;border-radius:8px;padding:12px;display:none}
+  </style>
+</head>
+<body><main>
+  <div class="mark">▥</div>
+  <h1>NIFTY Pro Trader</h1>
+  <p>Private research terminal. Sign in with the authorized Zerodha account to open the dashboard.</p>
+  <div class="alert" id="message" role="alert"></div>
+  <a class="button" href="/api/kite/connect">Sign in with Zerodha Kite</a>
+  <p class="small">The dashboard is read-only. Live and automatic orders are disabled. Your session may require a new login after the service restarts or the Kite token expires.</p>
+</main>
+<script>
+  const reason=new URLSearchParams(location.search).get('kite');
+  const message=document.getElementById('message');
+  if(reason==='unauthorized'){message.textContent='This Zerodha account is not authorized for this terminal.';message.style.display='block'}
+  else if(reason==='failed'){message.textContent='Sign-in failed or expired. Please try again.';message.style.display='block'}
+  if(reason)history.replaceState(null,'',location.pathname);
+</script></body></html>
