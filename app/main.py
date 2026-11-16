@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .brokers import KiteBroker, exchange_request_token, login_url
 from .demo import candles
+from .market_data import option_chain
 from .strategy import backtest, enrich
 
 load_dotenv()
@@ -170,6 +171,19 @@ def market(request: Request):
                 "previous_close": ohlc.get("close"), "high": ohlc.get("high"), "low": ohlc.get("low")}
     except Exception:
         return unavailable
+
+
+@app.get("/api/option-chain")
+def chain(request: Request, expiry: str | None = None):
+    session = _session(request)
+    try:
+        broker = KiteBroker(os.environ["KITE_API_KEY"], session["access_token"])
+        return option_chain(broker, expiry=expiry)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    except Exception as exc:
+        return {"source": "UNAVAILABLE", "reason": f"Kite option data unavailable ({type(exc).__name__})",
+                "rows": [], "expiries": [], "tradeable": False}
 
 
 @app.get("/api/candles")
