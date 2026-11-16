@@ -49,10 +49,10 @@ def _depth(levels) -> list[dict]:
             for level in (levels or [])[:5] if (level.get("price") or 0) > 0]
 
 
-def _contract_quote(contract: dict | None, quotes: dict) -> dict | None:
+def _contract_quote(contract: dict | None, quotes: dict, exchange: str = "NFO") -> dict | None:
     if not contract:
         return None
-    item = quotes.get("NFO:" + contract["symbol"])
+    item = quotes.get(exchange + ":" + contract["symbol"])
     if not item:
         return None
     depth = item.get("depth") or {}
