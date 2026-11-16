@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 import app.main as terminal
 import app.market_data as market_data
+import app.commodity as commodity
 from app.demo import candles
 from app.risk import RiskLimits, validate_order
 from app.strategy import backtest
@@ -27,7 +28,7 @@ class PrivateTerminalTests(unittest.TestCase):
         with TestClient(terminal.app, base_url="https://testserver") as visitor:
             self.assertEqual(visitor.get("/healthz").json(), {"ok": True})
             self.assertIn("Sign in with Zerodha Kite", visitor.get("/").text)
-            for path in ("/api/status", "/api/market", "/api/option-chain", "/api/candles", "/api/ideas", "/api/backtest"):
+            for path in ("/api/status", "/api/market", "/api/option-chain", "/api/crude-oil", "/api/candles", "/api/ideas", "/api/backtest"):
                 self.assertEqual(visitor.get(path).status_code, 401, path)
             self.assertEqual(visitor.get("/static/index.html", follow_redirects=False).status_code, 303)
             self.assertEqual(visitor.post("/api/orders", json={}).status_code, 401)
@@ -120,6 +121,44 @@ class PrivateTerminalTests(unittest.TestCase):
         self.assertEqual(data["rows"][0]["pe"]["depth"]["sell"][0]["price"], 100)
         with self.assertRaises(ValueError):
             market_data.option_chain(broker, expiry="2026-12-01", today=date(2026, 11, 16))
+
+    def test_crude_oil_uses_mcx_future_reference_and_keeps_orders_locked(self):
+        from datetime import date
+
+        class Broker:
+            def instruments(self, exchange):
+                self.exchange = exchange
+                return [dict(exchange="MCX", segment="MCX", name="CRUDEOIL", instrument_type="FUT",
+                             tradingsymbol="CRUDEOIL26NOVFUT", expiry=date(2026, 11, 20), lot_size=100),
+                        *[dict(exchange="MCX", segment="MCX-OPT", name="CRUDEOIL", instrument_type=side,
+                               tradingsymbol=f"CRUDEOIL26NOV8500{side}", expiry=date(2026, 11, 17),
+                               strike=8500, lot_size=100) for side in ("CE", "PE")],
+                        dict(exchange="MCX", segment="MCX-OPT", name="CRUDEOILM", instrument_type="CE",
+                             tradingsymbol="CRUDEOILM26NOV8500CE", expiry=date(2026, 11, 17),
+                             strike=8500, lot_size=10)]
+
+            def quote(self, instruments):
+                self.requested.append(instruments)
+                return {symbol: {"last_price": 8512 if symbol.endswith("FUT") else 120,
+                                 "oi": 2500, "volume": 400, "timestamp": "2026-11-16 18:00:00",
+                                 "depth": {"buy": [{"price": 119, "quantity": 100, "orders": 1}],
+                                           "sell": [{"price": 121, "quantity": 100, "orders": 2}]}}
+                        for symbol in instruments}
+
+        commodity._day = None
+        broker = Broker()
+        broker.requested = []
+        result = commodity.crude_oil_snapshot(broker, today=date(2026, 11, 16))
+        self.assertEqual(broker.exchange, "MCX")
+        self.assertEqual(result["future"]["symbol"], "CRUDEOIL26NOVFUT")
+        self.assertEqual(result["future"]["lot_size"], 100)
+        self.assertEqual(result["expiry"], "2026-11-17")
+        self.assertEqual(result["rows"][0]["strike"], 8500)
+        self.assertEqual(result["rows"][0]["ce"]["depth"]["buy"][0]["quantity"], 100)
+        self.assertEqual(broker.requested[1], ["MCX:CRUDEOIL26NOV8500CE", "MCX:CRUDEOIL26NOV8500PE"])
+        self.assertFalse(result["tradeable"])
+        with self.assertRaises(ValueError):
+            commodity.crude_oil_snapshot(broker, expiry="2026-12-01", today=date(2026, 11, 16))
 
 
 if __name__ == "__main__":
