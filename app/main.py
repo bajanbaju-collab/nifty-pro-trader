@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .brokers import KiteBroker, exchange_request_token, login_url
@@ -22,13 +22,18 @@ IST = ZoneInfo("Asia/Kolkata")
 SESSION_COOKIE = "nifty_kite_session"
 _sessions: dict[str, dict] = {}
 _sessions_lock = Lock()
-app = FastAPI(title="NIFTY Pro Trader — Research Terminal")
+app = FastAPI(title="NIFTY Pro Trader — Research Terminal", docs_url=None, redoc_url=None, openapi_url=None)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+PUBLIC_PATHS = {"/", "/healthz", "/api/kite/connect", "/api/kite/callback"}
 
 
 @app.middleware("http")
 async def privacy_headers(request: Request, call_next):
-    response = await call_next(request)
+    if request.url.path not in PUBLIC_PATHS and not _connected(request):
+        response = (JSONResponse({"detail": "Owner sign-in required"}, status_code=401)
+                    if request.url.path.startswith("/api/") else RedirectResponse("/", status_code=303))
+    else:
+        response = await call_next(request)
     response.headers["Cache-Control"] = "no-store"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -38,6 +43,14 @@ async def privacy_headers(request: Request, call_next):
 
 def _configured() -> bool:
     return bool(os.getenv("KITE_API_KEY") and os.getenv("KITE_API_SECRET"))
+
+
+def _owner_id() -> str:
+    return os.getenv("ALLOWED_KITE_USER_ID", "").strip()
+
+
+def _ready() -> bool:
+    return _configured() and bool(_owner_id())
 
 
 def _session(request: Request) -> dict:
@@ -51,12 +64,14 @@ def _session(request: Request) -> dict:
 
 
 def _connected(request: Request) -> bool:
-    return bool(_configured() and _session(request).get("access_token"))
+    session = _session(request)
+    return bool(_ready() and session.get("access_token") and
+                secrets.compare_digest(str(session.get("user_id") or ""), _owner_id()))
 
 
 @app.get("/", include_in_schema=False)
-def home():
-    return FileResponse(ROOT / "static" / "index.html")
+def home(request: Request):
+    return FileResponse(ROOT / "static" / ("index.html" if _connected(request) else "login.html"))
 
 
 @app.get("/healthz")
@@ -83,8 +98,8 @@ def kite_status(request: Request):
 
 @app.get("/api/kite/connect")
 def kite_connect(request: Request):
-    if not _configured():
-        raise HTTPException(503, "Kite Connect app keys are not configured on the server")
+    if not _ready():
+        raise HTTPException(503, "Private Kite access is not configured on the server")
     sid = request.cookies.get(SESSION_COOKIE)
     nonce = secrets.token_urlsafe(32)
     with _sessions_lock:
@@ -106,12 +121,14 @@ def kite_callback(request: Request, request_token: str | None = None):
         if sid in _sessions:
             _sessions[sid].pop("nonce", None)
             _sessions[sid].pop("pending_until", None)
-    if (not _configured() or not request_token or not nonce or
+    if (not _ready() or not request_token or not nonce or
             not secrets.compare_digest(nonce, pending.get("nonce", "")) or
             datetime.now(IST) > pending.get("pending_until", datetime.min.replace(tzinfo=IST))):
         return RedirectResponse("/?kite=failed", status_code=303)
     try:
         data = exchange_request_token(os.environ["KITE_API_KEY"], os.environ["KITE_API_SECRET"], request_token)
+        if not secrets.compare_digest(str(data.get("user_id") or ""), _owner_id()):
+            return RedirectResponse("/?kite=unauthorized", status_code=303)
         now = datetime.now(IST)
         expiry_date = now.date() + timedelta(days=1 if now.time() >= time(6) else 0)
         with _sessions_lock:
