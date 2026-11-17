@@ -17,6 +17,7 @@ from .commodity import crude_oil_snapshot
 from .demo import candles
 from .market_data import derivatives_snapshot, option_chain
 from .strategy import backtest, enrich
+from .trade_setup import trade_setup
 
 load_dotenv()
 ROOT = Path(__file__).resolve().parent.parent
@@ -211,6 +212,17 @@ def crude_oil(request: Request, expiry: str | None = None):
     except Exception as exc:
         return {"source": "UNAVAILABLE", "reason": f"Kite MCX data unavailable ({type(exc).__name__})",
                 "rows": [], "expiries": [], "tradeable": False}
+
+
+@app.get("/api/trade-setup")
+def setup(request: Request):
+    session = _session(request)
+    try:
+        broker = KiteBroker(os.environ["KITE_API_KEY"], session["access_token"])
+        return trade_setup(broker)
+    except Exception as exc:
+        return {"source": "UNAVAILABLE", "status": "UNAVAILABLE", "reason": f"Kite setup data unavailable ({type(exc).__name__})",
+                "automation": False, "tradeable": False}
 
 
 @app.get("/api/candles")
