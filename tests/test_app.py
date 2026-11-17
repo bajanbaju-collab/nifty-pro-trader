@@ -1,4 +1,5 @@
 import os
+import importlib
 import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 import app.main as terminal
 import app.market_data as market_data
 import app.commodity as commodity
+setup_module = importlib.import_module("app.trade_setup")
 from app.demo import candles
 from app.risk import RiskLimits, validate_order
 from app.strategy import backtest
@@ -28,7 +30,7 @@ class PrivateTerminalTests(unittest.TestCase):
         with TestClient(terminal.app, base_url="https://testserver") as visitor:
             self.assertEqual(visitor.get("/healthz").json(), {"ok": True})
             self.assertIn("Sign in with Zerodha Kite", visitor.get("/").text)
-            for path in ("/api/status", "/api/market", "/api/option-chain", "/api/derivatives", "/api/crude-oil", "/api/candles", "/api/ideas", "/api/backtest"):
+            for path in ("/api/status", "/api/market", "/api/option-chain", "/api/derivatives", "/api/crude-oil", "/api/trade-setup", "/api/candles", "/api/ideas", "/api/backtest"):
                 self.assertEqual(visitor.get(path).status_code, 401, path)
             self.assertEqual(visitor.get("/static/index.html", follow_redirects=False).status_code, 303)
             self.assertEqual(visitor.post("/api/orders", json={}).status_code, 401)
@@ -192,6 +194,51 @@ class PrivateTerminalTests(unittest.TestCase):
             market = terminal.market(None)
         self.assertIsNone(market["high"])
         self.assertIsNone(market["low"])
+
+    def test_trade_setup_uses_completed_candles_and_never_enables_orders(self):
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        ist = ZoneInfo("Asia/Kolkata")
+        start = datetime(2026, 11, 17, 9, 15, tzinfo=ist)
+
+        class Broker:
+            def historical_data(self, token, from_date, to_date, interval):
+                self.request = (token, from_date, to_date, interval)
+                return [{"date": start + timedelta(minutes=5*i),
+                         "open": 25000, "high": 25102 if i == 20 else 25002,
+                         "low": 24998, "close": 25100 if i == 20 else 25000,
+                         "volume": 200 if i == 20 else 100}
+                        for i in range(21)]
+
+        chain = {"source": "KITE_SNAPSHOT", "missing_quotes": 0, "undated_quotes": 0,
+                 "spot_timestamp": "2026-11-17 11:00:00", "spot": 25100,
+                 "expiry": "2026-11-19", "rows": [{"strike": 25100,
+                     "ce": {"symbol": "NIFTY_CE", "dated_today": True,
+                            "timestamp": "2026-11-17 11:00:00", "bid": 99.5,
+                            "ask": 100, "oi": 10000, "volume": 500, "lot_size": 65}}]}
+        broker = Broker()
+        with patch.object(setup_module, "nearest_nifty_future", return_value={
+                 "symbol": "NIFTY26NOVFUT", "instrument_token": 12345}), \
+             patch.object(setup_module, "option_chain", return_value=chain) as options:
+            early = setup_module.trade_setup(broker, now=datetime(2026, 11, 17, 10, 1, tzinfo=ist))
+            self.assertEqual(early["status"], "WAIT")
+            self.assertLess(early["closed_candles"], 21)
+            self.assertFalse(options.called)
+            result = setup_module.trade_setup(broker, now=datetime(2026, 11, 17, 11, 1, tzinfo=ist))
+            self.assertEqual(result["status"], "WATCH")
+            self.assertEqual(result["signal"], "CE")
+            self.assertEqual(result["option_symbol"], "NIFTY_CE")
+            self.assertEqual(result["entry_ask"], 100)
+            self.assertEqual(result["stop"], 80)
+            self.assertEqual(result["target"], 140)
+            self.assertEqual(result["max_loss"], 1300)
+            self.assertFalse(result["tradeable"])
+            self.assertFalse(result["automation"])
+            self.assertEqual(broker.request[3], "5minute")
+            stale = setup_module.trade_setup(broker, now=datetime(2026, 11, 17, 11, 20, tzinfo=ist))
+            self.assertEqual(stale["status"], "WAIT")
+            self.assertIn("old", stale["reason"])
+            self.assertEqual(options.call_count, 1)
 
     def test_crude_oil_uses_mcx_future_reference_and_keeps_orders_locked(self):
         from datetime import date
