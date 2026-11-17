@@ -169,7 +169,9 @@ def market(request: Request):
         ohlc = item.get("ohlc") or {}
         return {**unavailable, "source": "KITE_SNAPSHOT", "timestamp": str(item.get("timestamp") or "") or None,
                 "spot": item.get("last_price"), "change": item.get("net_change"),
-                "previous_close": ohlc.get("close"), "high": ohlc.get("high"), "low": ohlc.get("low")}
+                "previous_close": ohlc.get("close"),
+                "high": ohlc.get("high") if (ohlc.get("high") or 0) > 0 else None,
+                "low": ohlc.get("low") if (ohlc.get("low") or 0) > 0 else None}
     except Exception:
         return unavailable
 
