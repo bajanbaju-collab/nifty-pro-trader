@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from .brokers import KiteBroker, exchange_request_token, login_url
 from .commodity import crude_oil_snapshot
 from .demo import candles
-from .market_data import option_chain
+from .market_data import derivatives_snapshot, option_chain
 from .strategy import backtest, enrich
 
 load_dotenv()
@@ -187,6 +187,17 @@ def chain(request: Request, expiry: str | None = None):
     except Exception as exc:
         return {"source": "UNAVAILABLE", "reason": f"Kite option data unavailable ({type(exc).__name__})",
                 "rows": [], "expiries": [], "tradeable": False}
+
+
+@app.get("/api/derivatives")
+def derivatives(request: Request):
+    session = _session(request)
+    try:
+        broker = KiteBroker(os.environ["KITE_API_KEY"], session["access_token"])
+        return derivatives_snapshot(broker)
+    except Exception as exc:
+        return {"source": "UNAVAILABLE", "reason": f"Kite derivatives unavailable ({type(exc).__name__})",
+                "futures": None, "vix": None, "tradeable": False}
 
 
 @app.get("/api/crude-oil")
