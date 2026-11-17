@@ -20,6 +20,9 @@ class KiteBroker:
     def instruments(self, exchange: str) -> list[dict]:
         return self.kite.instruments(exchange)
 
+    def historical_data(self, instrument_token: int, start, end, interval: str) -> list[dict]:
+        return self.kite.historical_data(instrument_token, start, end, interval)
+
 
 def login_url(api_key: str, nonce: str) -> str:
     from kiteconnect import KiteConnect
