@@ -28,7 +28,7 @@ class PrivateTerminalTests(unittest.TestCase):
         with TestClient(terminal.app, base_url="https://testserver") as visitor:
             self.assertEqual(visitor.get("/healthz").json(), {"ok": True})
             self.assertIn("Sign in with Zerodha Kite", visitor.get("/").text)
-            for path in ("/api/status", "/api/market", "/api/option-chain", "/api/crude-oil", "/api/candles", "/api/ideas", "/api/backtest"):
+            for path in ("/api/status", "/api/market", "/api/option-chain", "/api/derivatives", "/api/crude-oil", "/api/candles", "/api/ideas", "/api/backtest"):
                 self.assertEqual(visitor.get(path).status_code, 401, path)
             self.assertEqual(visitor.get("/static/index.html", follow_redirects=False).status_code, 303)
             self.assertEqual(visitor.post("/api/orders", json={}).status_code, 401)
@@ -147,6 +147,41 @@ class PrivateTerminalTests(unittest.TestCase):
         self.assertEqual(chain["undated_quotes"], 2)
         self.assertEqual(chain["without_depth"], 2)
         self.assertIsNone(chain["quote_time"])
+
+    def test_nifty_futures_oi_and_vix_are_read_only_snapshots(self):
+        from datetime import date
+
+        class Broker:
+            def __init__(self):
+                self.instrument_calls = 0
+
+            def instruments(self, exchange):
+                self.instrument_calls += 1
+                self.exchange = exchange
+                return [dict(exchange="NFO", segment="NFO-FUT", name="NIFTY",
+                             instrument_type="FUT", tradingsymbol=symbol,
+                             expiry=date(2026, 11, day), strike=None, lot_size=65)
+                        for day, symbol in [(26, "NIFTY26NOVFUT"), (19, "NIFTY19NOVFUT")]]
+
+            def quote(self, symbols):
+                self.symbols = symbols
+                return {
+                    "NSE:INDIA VIX": {"last_price": 14.2, "timestamp": "2026-11-17 10:30:00"},
+                    "NFO:NIFTY19NOVFUT": {"last_price": 25100.5, "oi": 123456,
+                                          "timestamp": "2026-11-17 10:30:00"},
+                }
+
+        market_data._instrument_day = None
+        broker = Broker()
+        data = market_data.derivatives_snapshot(broker, today=date(2026, 11, 17))
+        self.assertEqual(broker.exchange, "NFO")
+        self.assertEqual(broker.symbols, ["NSE:INDIA VIX", "NFO:NIFTY19NOVFUT"])
+        self.assertEqual(data["futures"]["oi"], 123456)
+        self.assertEqual(data["futures"]["expiry"], "2026-11-19")
+        self.assertEqual(data["vix"]["value"], 14.2)
+        self.assertFalse(data["tradeable"])
+        market_data.derivatives_snapshot(broker, today=date(2026, 11, 17))
+        self.assertEqual(broker.instrument_calls, 1)
 
     def test_zero_day_range_is_unavailable(self):
         with patch.object(terminal, "_session", return_value={"access_token": "test-token"}), \
