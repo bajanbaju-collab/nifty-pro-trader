@@ -49,7 +49,8 @@ def _depth(levels) -> list[dict]:
             for level in (levels or [])[:5] if (level.get("price") or 0) > 0]
 
 
-def _contract_quote(contract: dict | None, quotes: dict, exchange: str = "NFO") -> dict | None:
+def _contract_quote(contract: dict | None, quotes: dict, exchange: str = "NFO",
+                    today: date | None = None) -> dict | None:
     if not contract:
         return None
     item = quotes.get(exchange + ":" + contract["symbol"])
@@ -57,9 +58,12 @@ def _contract_quote(contract: dict | None, quotes: dict, exchange: str = "NFO") 
         return None
     depth = item.get("depth") or {}
     bid, ask = _depth(depth.get("buy")), _depth(depth.get("sell"))
+    raw_time = str(item.get("timestamp") or "")
+    timestamp = raw_time if raw_time and not raw_time.startswith(("1970-", "0001-")) else None
     return {"symbol": contract["symbol"], "lot_size": contract["lot_size"],
             "last_price": item.get("last_price"), "volume": item.get("volume"),
-            "oi": item.get("oi"), "timestamp": str(item.get("timestamp") or "") or None,
+            "oi": item.get("oi"), "timestamp": timestamp,
+            "dated_today": bool(timestamp and today and timestamp[:10] == today.isoformat()),
             "bid": bid[0]["price"] if bid else None, "ask": ask[0]["price"] if ask else None,
             "bid_qty": bid[0]["quantity"] if bid else None,
             "ask_qty": ask[0]["quantity"] if ask else None,
@@ -93,14 +97,18 @@ def option_chain(broker, expiry: str | None = None, today: date | None = None) -
                for side in ("CE", "PE") if side in by_strike[strike]]
     quotes = broker.quote(symbols) if symbols else {}
     rows = [{"strike": strike, "atm": strike == strikes[atm_index],
-             "ce": _contract_quote(by_strike[strike].get("CE"), quotes),
-             "pe": _contract_quote(by_strike[strike].get("PE"), quotes)}
+             "ce": _contract_quote(by_strike[strike].get("CE"), quotes, today=today),
+             "pe": _contract_quote(by_strike[strike].get("PE"), quotes, today=today)}
             for strike in selected_strikes]
     times = [side["timestamp"] for row in rows for side in (row["ce"], row["pe"])
              if side and side["timestamp"]]
+    sides = [side for row in rows for side in (row["ce"], row["pe"]) if side]
     missing = len(symbols) - len(quotes)
+    undated = sum(not side["timestamp"] or side["timestamp"][:10] != today.isoformat() for side in sides)
+    no_depth = sum(not side["bid"] or not side["ask"] for side in sides)
     return {"source": "KITE_SNAPSHOT", "expiry": selected, "expiries": expiries[:8],
             "spot": spot, "spot_timestamp": str(spot_item.get("timestamp") or "") or None,
             "quote_time": max(times) if times else None, "rows": rows,
-            "missing_quotes": max(0, missing), "tradeable": False,
+            "missing_quotes": max(0, missing), "undated_quotes": undated,
+            "without_depth": no_depth, "tradeable": False,
             "note": "Kite snapshot, not streaming. OI is quantity, not OI change. IV and Greeks are not supplied."}
