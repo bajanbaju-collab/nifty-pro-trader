@@ -38,7 +38,8 @@ def _contracts(broker, today: date) -> list[dict]:
                 continue
             if item.get("segment") == "NFO-FUT" and item.get("instrument_type") == "FUT":
                 futures.append({"expiry": expiry.isoformat(), "symbol": item["tradingsymbol"],
-                                "lot_size": int(item.get("lot_size") or 0)})
+                                "lot_size": int(item.get("lot_size") or 0),
+                                "instrument_token": item.get("instrument_token")})
             elif item.get("segment") == "NFO-OPT" and item.get("instrument_type") in ("CE", "PE"):
                 try:
                     strike = float(item["strike"])
@@ -55,10 +56,14 @@ def _contracts(broker, today: date) -> list[dict]:
         return rows
 
 
+def nearest_nifty_future(broker, today: date) -> dict | None:
+    _contracts(broker, today)
+    return _nifty_futures[0].copy() if _nifty_futures else None
+
+
 def derivatives_snapshot(broker, today: date | None = None) -> dict:
     today = today or datetime.now(IST).date()
-    _contracts(broker, today)
-    future = _nifty_futures[0] if _nifty_futures else None
+    future = nearest_nifty_future(broker, today)
     symbols = ["NSE:INDIA VIX"] + (["NFO:" + future["symbol"]] if future else [])
     quotes = broker.quote(symbols)
     vix_quote = quotes.get("NSE:INDIA VIX") or {}
