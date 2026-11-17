@@ -119,8 +119,44 @@ class PrivateTerminalTests(unittest.TestCase):
         self.assertFalse(data["tradeable"])
         self.assertEqual(data["rows"][0]["ce"]["oi"], 13000)
         self.assertEqual(data["rows"][0]["pe"]["depth"]["sell"][0]["price"], 100)
+        self.assertEqual(data["undated_quotes"], 0)
+        self.assertEqual(data["without_depth"], 0)
         with self.assertRaises(ValueError):
             market_data.option_chain(broker, expiry="2026-12-01", today=date(2026, 11, 16))
+
+    def test_uninitialized_kite_quote_is_not_dated_market_data(self):
+        from datetime import date
+        contract = {"symbol": "NIFTY_TEST_CE", "lot_size": 65}
+        quote = {"NFO:NIFTY_TEST_CE": {"last_price": 100, "oi": 500,
+                                        "volume": 0, "timestamp": "1970-01-01 05:30:00",
+                                        "depth": {"buy": [], "sell": []}}}
+        result = market_data._contract_quote(contract, quote, today=date(2026, 11, 17))
+        self.assertIsNone(result["timestamp"])
+        self.assertFalse(result["dated_today"])
+        self.assertIsNone(result["bid"])
+        class Broker:
+            def quote(self, instruments):
+                if instruments == ["NSE:NIFTY 50"]:
+                    return {"NSE:NIFTY 50": {"last_price": 25300, "timestamp": "2026-11-17 08:57:00"}}
+                return {symbol: quote["NFO:NIFTY_TEST_CE"] for symbol in instruments}
+        contracts = [{**contract, "expiry": "2026-11-17", "strike": 25300,
+                      "type": side, "symbol": f"NIFTY_TEST_{side}"} for side in ("CE", "PE")]
+        with patch.object(market_data, "_contracts", return_value=contracts):
+            chain = market_data.option_chain(Broker(), today=date(2026, 11, 17))
+        self.assertEqual(chain["missing_quotes"], 0)
+        self.assertEqual(chain["undated_quotes"], 2)
+        self.assertEqual(chain["without_depth"], 2)
+        self.assertIsNone(chain["quote_time"])
+
+    def test_zero_day_range_is_unavailable(self):
+        with patch.object(terminal, "_session", return_value={"access_token": "test-token"}), \
+             patch.object(terminal, "KiteBroker") as broker:
+            broker.return_value.quote.return_value = {"NSE:NIFTY 50": {
+                "last_price": 25300, "timestamp": "2026-11-17 08:57:00",
+                "ohlc": {"high": 0, "low": 0, "close": 25200}}}
+            market = terminal.market(None)
+        self.assertIsNone(market["high"])
+        self.assertIsNone(market["low"])
 
     def test_crude_oil_uses_mcx_future_reference_and_keeps_orders_locked(self):
         from datetime import date
