@@ -9,6 +9,7 @@ IST = ZoneInfo("Asia/Kolkata")
 _instrument_lock = Lock()
 _instrument_day: date | None = None
 _nifty_options: list[dict] = []
+_nifty_futures: list[dict] = []
 
 
 def _date(value) -> date:
@@ -20,27 +21,59 @@ def _date(value) -> date:
 
 
 def _contracts(broker, today: date) -> list[dict]:
-    global _instrument_day, _nifty_options
+    global _instrument_day, _nifty_options, _nifty_futures
     with _instrument_lock:
         if _instrument_day == today:
             return _nifty_options
         rows = []
+        futures = []
         for item in broker.instruments("NFO"):
-            if (item.get("exchange") != "NFO" or item.get("segment") != "NFO-OPT" or
-                    item.get("name") != "NIFTY" or item.get("instrument_type") not in ("CE", "PE")):
+            if item.get("exchange") != "NFO" or item.get("name") != "NIFTY":
                 continue
             try:
                 expiry = _date(item["expiry"])
-                strike = float(item["strike"])
             except (KeyError, TypeError, ValueError):
                 continue
-            if expiry >= today and strike > 0 and item.get("tradingsymbol"):
+            if expiry < today or not item.get("tradingsymbol"):
+                continue
+            if item.get("segment") == "NFO-FUT" and item.get("instrument_type") == "FUT":
+                futures.append({"expiry": expiry.isoformat(), "symbol": item["tradingsymbol"],
+                                "lot_size": int(item.get("lot_size") or 0)})
+            elif item.get("segment") == "NFO-OPT" and item.get("instrument_type") in ("CE", "PE"):
+                try:
+                    strike = float(item["strike"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if strike <= 0:
+                    continue
                 rows.append({"expiry": expiry.isoformat(), "strike": strike,
                              "type": item["instrument_type"], "symbol": item["tradingsymbol"],
                              "lot_size": int(item.get("lot_size") or 0)})
         _nifty_options = rows
+        _nifty_futures = sorted(futures, key=lambda c: c["expiry"])
         _instrument_day = today
         return rows
+
+
+def derivatives_snapshot(broker, today: date | None = None) -> dict:
+    today = today or datetime.now(IST).date()
+    _contracts(broker, today)
+    future = _nifty_futures[0] if _nifty_futures else None
+    symbols = ["NSE:INDIA VIX"] + (["NFO:" + future["symbol"]] if future else [])
+    quotes = broker.quote(symbols)
+    vix_quote = quotes.get("NSE:INDIA VIX") or {}
+    future_quote = quotes.get("NFO:" + future["symbol"]) if future else None
+
+    def dated(item):
+        raw = str((item or {}).get("timestamp") or "")
+        return raw if raw and not raw.startswith(("1970-", "0001-")) else None
+
+    vix = {"value": vix_quote.get("last_price"), "timestamp": dated(vix_quote)} if vix_quote else None
+    futures = ({"symbol": future["symbol"], "expiry": future["expiry"],
+                "oi": future_quote.get("oi"), "last_price": future_quote.get("last_price"),
+                "timestamp": dated(future_quote)} if future and future_quote else None)
+    return {"source": "KITE_SNAPSHOT", "futures": futures, "vix": vix,
+            "tradeable": False, "note": "OI is a snapshot, not daily change. India VIX is not ATM option IV."}
 
 
 def _depth(levels) -> list[dict]:
